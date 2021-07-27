@@ -1,0 +1,24 @@
+## SEGGER Embedded Studio and JLink ##
+*/hex/
+*.emSession
+*.jlink
+
+## KEIL AND JLINK ##
+_build
+RTE
+JLinkSettings.ini
+JLinkLog.txt
+*.uvguix*
+
+## Crypto Library should not be pushed directly ##
+crypto_libs
+
+## Symlinks should not be commited ##
+sdk_components
+sdk_external
+
+
+##Script to generate merged hex file##
+copy_merge_hex.sh
+
+

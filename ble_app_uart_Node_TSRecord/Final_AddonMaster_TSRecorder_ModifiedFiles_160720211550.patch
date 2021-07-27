@@ -1,0 +1,508 @@
+Index: main.c
+===================================================================
+--- main.c	(revision 14)
++++ main.c	(working copy)
+@@ -78,11 +78,17 @@
+ #define UART_RX_BUF_SIZE                256                                         /**< UART RX buffer size. */
+ 
+ #define CONFIGURATION_PAGE_ADDR          0x36000UL
+-#define CONFIGURATION_PAGE_END_ADDR      0x37FFFUL
++#define CONFIGURATION_PAGE_END_ADDR      0x39FFFUL
+ #define RECORDED_TIMESTAMP_PAGE_ADDR     0x37000UL
+-#define NO_OF_FLASH_PAGE                 2
++#define RECORDED_TEMPERATURE_PAGE_ADDR   0x38000UL
++#define NO_OF_FLASH_PAGE                 4
+ 
+ #define LED_PIN                         19
++#define LED_PIN_1                         14
++#define LED_PIN_2                         17
++#define LED_PIN_3                         18
++#define LED_PIN_4                         23
++#define LED_PIN_5                         27
+ #define BUTTON_PIN                      20
+ #define MAX17048_ADDR                   0x36
+ 
+@@ -115,6 +121,8 @@
+ #define GET_ACCESS_CMD_RESPONSE_SUCCESS           "0x57,1"
+ #define GET_ACCESS_CMD_RESPONSE_FAILED            "0x57,0"
+ 
++#define RECORD_TEMPERATURE_INTERVAL         7200 //15 min
++#define LED_OFF_CNT                         480 //  60sec
+ #define WAKEUPMODE_CNT                    24
+ #define LED_INTERVAL                      240
+ #define TOTAL_TIMESTAMP                   250
+@@ -163,14 +171,15 @@
+ //#define ADC_RESULT_IN_MILLI_VOLTS(ADC_VALUE) \
+ //    ((((ADC_VALUE) *ADC_REF_VOLTAGE_IN_MILLIVOLTS) / ADC_RES_10BIT) * ADC_PRE_SCALING_COMPENSATION)
+ #define ADC_RESULT_IN_MILLI_VOLTS(ADC_VALUE) \
+-    ((((ADC_VALUE)*4300) / ADC_RES_10BIT))
++    ((((ADC_VALUE)*3600) / ADC_RES_10BIT))
+ 
+-nrf_saadc_value_t guADCRaw_buf;                   //!< Buffer used for storing ADC value.
++nrf_saadc_value_t guADCRaw_buf[2];                   //!< Buffer used for storing ADC value.
+ uint16_t          guBatteryVoltagelevelmillis,guBatteryInPercent= 0; //!< Current battery level.
+ uint16_t guLEDToggleCnt,guLEDCounter, gbProcessLED, guLEDDelay, gbConnected=0;
+ uint32_t * volatile p_ram_test = (uint32_t *)RAM_MEMORY_TEST_ADDRESS;
+ uint32_t guClockSeconds = 0, tickCnt=0;
+ uint8_t RtcEventGenerated = 0;
++int giTemperature = 0,ButtonPressedCounter = 0,deviceLEDOffCnt = 0,RecordTemperatureIntervalCnt=0;
+ bool gbisUARTBusy = 0,gbButtonReleased=0,gbbootsuccess =0,gbAccessGiven = 0;
+ static void advertising_start(void);
+ static void fstorage_evt_handler(nrf_fstorage_evt_t * p_evt);
+@@ -191,6 +200,15 @@
+ 
+ Timestamp_t gxRecordOfflineTimestamp;
+ 
++typedef struct
++{
++  uint32_t Timestamp[TOTAL_TIMESTAMP];
++  int Temperature[TOTAL_TIMESTAMP];
++  int TimestampCount;
++}TimestampTemperature_t;
++
++TimestampTemperature_t gxRecordOfflineTemperature;
++
+ #ifdef MAX1708_ENABLE
+ MAX17048_t gxMAX17048;
+ #endif
+@@ -404,7 +422,8 @@
+     {
+         guLEDCounter++;
+         guLEDToggleCnt++;
+-       
++        deviceLEDOffCnt++;
++        RecordTemperatureIntervalCnt++;
+         if(guLEDCounter >= guLEDDelay && gbProcessLED == 1)
+         {
+           gbProcessLED = 0;
+@@ -455,15 +474,20 @@
+ {
+     if (p_evt->type == NRF_DRV_SAADC_EVT_DONE)
+     {
+-        nrf_saadc_value_t adc_result;
++        nrf_saadc_value_t adc_result,adc_result1;
+ 
+         adc_result = p_evt->data.done.p_buffer[0];
++        adc_result1 = p_evt->data.done.p_buffer[1];
+ 
+         guBatteryVoltagelevelmillis = ADC_RESULT_IN_MILLI_VOLTS(adc_result) ;//+ DIODE_FWD_VOLT_DROP_MILLIVOLTS;
+         //RealBatteryVoltagemillis = BAT_SLOPE * (float)(adc_result - REF_RAW_VAL) + (float)REF_VOLT;
++        giTemperature = roundf((float)(3.3 * adc_result1 * 1000.0)/(float)(1024*10));
+ #if SERIAL_DEBUG_ENABLE
+-        NRF_LOG_INFO("Bat = %d",guBatteryVoltagelevelmillis);
+-        NRF_LOG_PROCESS();
++//        NRF_LOG_INFO("Bat = %d",guBatteryVoltagelevelmillis);
++//        NRF_LOG_PROCESS();
++//
++//        NRF_LOG_INFO("LM35RAW = %d,%d",adc_result1,giTemperature);
++//        NRF_LOG_PROCESS();
+ #endif
+         double tfSlope = 1.0 * (100 - 0) / (2767 - 2433);
+         guBatteryInPercent = 0 + tfSlope * (float)(guBatteryVoltagelevelmillis - 2433);
+@@ -479,14 +503,20 @@
+ 
+     APP_ERROR_CHECK(err_code);
+ 
+-    nrf_saadc_channel_config_t config =
+-        NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_VDD);
++     nrf_saadc_channel_config_t config =
++        NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN0);
+     err_code = nrf_drv_saadc_channel_init(0, &config);
+     APP_ERROR_CHECK(err_code);
+ 
+-    err_code = nrf_drv_saadc_buffer_convert(&guADCRaw_buf, 1);
++
++    nrf_saadc_channel_config_t config1 =
++        NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_AIN1);
++    err_code = nrf_drv_saadc_channel_init(1, &config1);
+     APP_ERROR_CHECK(err_code);
+ 
++    err_code = nrf_drv_saadc_buffer_convert(&guADCRaw_buf[0], 2);
++    APP_ERROR_CHECK(err_code);
++
+     err_code = nrf_drv_saadc_sample();
+     APP_ERROR_CHECK(err_code);
+ }
+@@ -496,7 +526,7 @@
+ {
+     if (!nrf_drv_saadc_is_busy())
+     {
+-        ret_code_t err_code = nrf_drv_saadc_buffer_convert(&guADCRaw_buf, 1);
++        ret_code_t err_code = nrf_drv_saadc_buffer_convert(&guADCRaw_buf[0], 2);
+         APP_ERROR_CHECK(err_code);
+ 
+         err_code = nrf_drv_saadc_sample();
+@@ -891,16 +921,16 @@
+         vSendDataToBLEUART(READ_BAT_CMD_ACK);
+ 
+         //baterry monitor
+-        vBatteryInit();
+-        nrf_delay_ms(100);
++//        vBatteryInit();
++//        nrf_delay_ms(100);
+         for(int Ind=0;Ind < 5;Ind++)
+         {
+           update_vbatt();
+           nrf_delay_ms(5);
+         }
+-        nrf_delay_ms(50);
+-        nrfx_saadc_channel_uninit(0);
+-        nrfx_saadc_uninit();
++//        nrf_delay_ms(50);
++//        nrfx_saadc_channel_uninit(0);
++//        nrfx_saadc_uninit();
+ 
+          NRF_LOG_INFO("Batt: %d percent",guBatteryInPercent);
+          NRF_LOG_PROCESS();
+@@ -923,6 +953,8 @@
+         NRF_LOG_INFO("Read timestamp");
+         NRF_LOG_PROCESS();
+   #endif
++
++        //send timestamp
+         Timestamp_t txRecordOfflineTimestamp;
+         vReadFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR, &txRecordOfflineTimestamp, sizeof(txRecordOfflineTimestamp));
+          uint8_t TempBuffer[50];
+@@ -929,15 +961,30 @@
+         for(int index=0;index <txRecordOfflineTimestamp.TimestampCount ;index++)
+         {
+           memset(TempBuffer,0,sizeof(TempBuffer));       
+-          sprintf(TempBuffer,"%d\r\n",txRecordOfflineTimestamp.Timestamp[index]);
++          sprintf(TempBuffer,"#1,[%d]\r\n",txRecordOfflineTimestamp.Timestamp[index]);
+           vSendDataToBLEUART(TempBuffer);
+         }
++//
++//        uint8_t TempBuffer1[50];
++//        sprintf(TempBuffer1,"%s,%d",READ_TIMESTAMPS_CMD_RESPONSE,txRecordOfflineTimestamp.TimestampCount);
++//        vSendDataToBLEUART(TempBuffer1);
+ 
+-        uint8_t TempBuffer1[50];
+-        sprintf(TempBuffer1,"%s,%d",READ_TIMESTAMPS_CMD_RESPONSE,txRecordOfflineTimestamp.TimestampCount);
+-        vSendDataToBLEUART(TempBuffer1);
++        // send temperature
++        TimestampTemperature_t txRecordOfflineTemperature;
++        vReadFlash(&fstorage, RECORDED_TEMPERATURE_PAGE_ADDR, &txRecordOfflineTemperature, sizeof(txRecordOfflineTemperature));
++         uint8_t TempBuffer1[50];
++        for(int index=0;index <txRecordOfflineTemperature.TimestampCount ;index++)
++        {
++          memset(TempBuffer1,0,sizeof(TempBuffer1));       
++          sprintf(TempBuffer1,"#2,[%d,%d]\r\n",txRecordOfflineTemperature.Timestamp[index],txRecordOfflineTemperature.Temperature[index]);
++          vSendDataToBLEUART(TempBuffer1);
++        }
+ 
+-        if(txRecordOfflineTimestamp.TimestampCount != 0)
++        uint8_t TempBuffer2[50];
++        sprintf(TempBuffer2,"%s,%d,%d",READ_TIMESTAMPS_CMD_RESPONSE,txRecordOfflineTimestamp.TimestampCount,txRecordOfflineTemperature.TimestampCount);
++        vSendDataToBLEUART(TempBuffer2);
++
++        if(txRecordOfflineTimestamp.TimestampCount != 0 || txRecordOfflineTemperature.TimestampCount != 0)
+         {
+           InitTimestampStorage();
+         }
+@@ -996,9 +1043,12 @@
+ 
+ void InitTimestampStorage()
+ {
+-    memset(&gxRecordOfflineTimestamp,0,sizeof(gxRecordOfflineTimestamp));
+-   vEraseFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR,1, NULL);
++   memset(&gxRecordOfflineTimestamp,0,sizeof(gxRecordOfflineTimestamp));
++   memset(&gxRecordOfflineTemperature,0,sizeof(gxRecordOfflineTemperature));
++   vEraseFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR,2, NULL);
+    vWriteFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR, &gxRecordOfflineTimestamp, sizeof(gxRecordOfflineTimestamp));
++   vWriteFlash(&fstorage, RECORDED_TEMPERATURE_PAGE_ADDR, &gxRecordOfflineTemperature, sizeof(gxRecordOfflineTemperature));
++
+ }
+ 
+ void vInitFlashConfig()
+@@ -1023,8 +1073,9 @@
+   }
+ 
+   vReadFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR, &gxRecordOfflineTimestamp, sizeof(gxRecordOfflineTimestamp));
++  vReadFlash(&fstorage, RECORDED_TEMPERATURE_PAGE_ADDR, &gxRecordOfflineTemperature, sizeof(gxRecordOfflineTemperature));
+   #ifdef SERIAL_DEBUG_ENABLE
+-  NRF_LOG_INFO("%d, %d, %s,%s, %d",gxCurrentDeviceConfig.iTxPower,gxCurrentDeviceConfig.DevVersion,gxCurrentDeviceConfig.cDeviceName,gxCurrentDeviceConfig.uDevPassword,gxRecordOfflineTimestamp.TimestampCount);
++  NRF_LOG_INFO("%d, %d, %s,%s, %d, %d",gxCurrentDeviceConfig.iTxPower,gxCurrentDeviceConfig.DevVersion,gxCurrentDeviceConfig.cDeviceName,gxCurrentDeviceConfig.uDevPassword,gxRecordOfflineTimestamp.TimestampCount,gxRecordOfflineTemperature.TimestampCount);
+   NRF_LOG_PROCESS();
+ #endif
+ }
+@@ -1521,14 +1572,19 @@
+     APP_ERROR_CHECK(err_code);
+ }
+ 
+-void vInitLED(uint32_t pin_number)
++void vInitLED(uint32_t pin_number,uint32_t pin_number1,uint32_t pin_number2,uint32_t pin_number3,uint32_t pin_number4,uint32_t pin_number5)
+ {
+     nrf_gpio_cfg_output(pin_number);
++    nrf_gpio_cfg_output(pin_number1);
++    nrf_gpio_cfg_output(pin_number2);
++    nrf_gpio_cfg_output(pin_number3);
++    nrf_gpio_cfg_output(pin_number4);
++    nrf_gpio_cfg_output(pin_number5);
+ }
+ 
+ static void button_evt_handler(uint8_t pin_no, uint8_t button_action)
+ {
+-    if (button_action == APP_BUTTON_RELEASE && pin_no == BUTTON_PIN && gbbootsuccess == 1)
++    if (button_action == APP_BUTTON_PUSH && pin_no == BUTTON_PIN && gbbootsuccess == 1)
+     {
+ //      NRF_LOG_INFO("Btn Sleeping");
+ //      NRF_LOG_PROCESS();
+@@ -1541,6 +1597,7 @@
+ //       __DSB();
+ //       __NOP();
+      gbButtonReleased = 1;
++     deviceLEDOffCnt = 0;
+     }
+ }
+ 
+@@ -1591,7 +1648,29 @@
+ //    }
+ }
+ 
++int iGetTemperature()
++{
++  long sum=0;
++  int temperature = 0;
++  for(int Ind=0;Ind < 10;Ind++)
++  {
++    update_vbatt();
++    nrf_delay_ms(5);
++    sum += giTemperature;
++//#if SERIAL_DEBUG_ENABLE
++//    NRF_LOG_INFO("Temp:sum %d,gtemp:%d",sum,giTemperature);
++//    NRF_LOG_PROCESS();
++//#endif
++  }
++  temperature = roundf((float)sum/10);
++  #if SERIAL_DEBUG_ENABLE
++    NRF_LOG_INFO("Temp: %d,gtemp:%d",temperature,giTemperature);
++    NRF_LOG_PROCESS();
++#endif
++  return temperature;
++}
+ 
++
+ /**@brief Application main function.
+  */
+ int main(void)
+@@ -1610,12 +1689,24 @@
+     NRF_LOG_INFO("0x%08X",NRF_POWER->RESETREAS);
+     NRF_LOG_PROCESS();
+ #endif
++    
+ 
+     timers_init();
+     button_init();
+     //buttons_leds_init(&erase_bonds);
+-    vInitLED(LED_PIN);
++    vInitLED(LED_PIN,LED_PIN_1,LED_PIN_2,LED_PIN_3,LED_PIN_4,LED_PIN_5);
+ 
++      if(NRF_POWER->RESETREAS == 0x00010000)     // GPIO Wake up
++    {
++      gbButtonReleased = 1;
++     deviceLEDOffCnt = 0;
++     NRF_POWER->RESETREAS = 0xffffffff; //clear reset reason
++    }
++    else
++    {
++      NRF_POWER->RESETREAS = 0xffffffff; //clear reset reason
++    }
++
+ #ifdef SLEEP_CMD_ENABLE
+     if(NRF_POWER->RESETREAS == 0x00010000)     // GPIO Wake up
+     {
+@@ -1685,7 +1776,7 @@
+     services_init();
+     advertising_init();
+     conn_params_init();
+-
++    vBatteryInit();
+ #ifdef MAX1708_ENABLE
+     //init I2C
+     twi_init();
+@@ -1717,7 +1808,11 @@
+     sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_ADV, m_advertising.adv_handle,(int8_t)gxCurrentDeviceConfig.iTxPower);
+     //sd_ble_gap_tx_power_set(BLE_GAP_TX_POWER_ROLE_ADV, 0,4);
+     advertising_start();
+-    vPowerupLEDPattern();
++
++    if(gbButtonReleased != 1)
++    {
++      vPowerupLEDPattern();
++    }
+  // check at powerup if Battery percent is less than or equal to low percent indication. then blink LED for indication
+ #ifdef MAX1708_ENABLE
+       if(percent <= BATTERY_LOW_PERCENT)
+@@ -1725,6 +1820,7 @@
+           vLowBatteryLEDPattern();
+       }
+ #endif
++
+     gbbootsuccess = 1;
+ 
+ // Enter main loop.
+@@ -1742,11 +1838,12 @@
+          if(gbCmdReceived == 1)
+           {
+             gbCmdReceived = 0;
++            deviceLEDOffCnt = 0;
+             vProcessBLEUARTCmds(guUARTCmdBuffer);
+           }
+ 
+           //RTC event generated to update RTC clock seconds
+-          if(RtcEventGenerated == 1)
++          if(RtcEventGenerated == 1 && gbConnected != 1)
+           {
+ 
+ #ifdef MAX1708_ENABLE
+@@ -1763,16 +1860,17 @@
+             
+               RtcEventGenerated =0;
+               //baterry monitor
+-              vBatteryInit();
+-              nrf_delay_ms(100);
++//              vBatteryInit();
++//              nrf_delay_ms(100);
+               for(int Ind=0;Ind < 5;Ind++)
+               {
+                 update_vbatt();
+                 nrf_delay_ms(5);
++                
+               }
+-              nrf_delay_ms(50);
+-              nrfx_saadc_channel_uninit(0);
+-              nrfx_saadc_uninit();
++//              nrf_delay_ms(50);
++//              nrfx_saadc_channel_uninit(0);
++//              nrfx_saadc_uninit();
+ 
+                NRF_LOG_INFO("Batt: %d percent",guBatteryInPercent);
+                NRF_LOG_PROCESS();
+@@ -1794,8 +1892,35 @@
+           NRF_LOG_INFO("Btn released");
+           NRF_LOG_PROCESS();
+           uint8_t TempBuffer[50];
+-          sprintf(TempBuffer,"%d\r\n",uReadTime());
++          sprintf(TempBuffer,"#1,[%d]\r\n",uReadTime());
+           vSendDataToBLEUART(TempBuffer);
++          ButtonPressedCounter++;
++          switch(ButtonPressedCounter)
++          {
++            case 1:
++            vLEDOn(LED_PIN_1);
++            vLEDOff(LED_PIN_2);
++            vLEDOff(LED_PIN_3);
++            vLEDOff(LED_PIN_4);
++            vLEDOff(LED_PIN_5);
++            break;
++            case 2:
++            vLEDOn(LED_PIN_2);
++            break;
++            case 3:
++            vLEDOn(LED_PIN_3);
++            break;
++            case 4:
++            vLEDOn(LED_PIN_4);
++            break;
++            case 5:
++            vLEDOn(LED_PIN_5);
++            ButtonPressedCounter = 0;
++            break;
++            default:
++
++            break;
++          }
+         }
+         else if(gbButtonReleased == 1)
+         {
+@@ -1821,13 +1946,85 @@
+           }
+           vEraseFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR,1, NULL);
+           vWriteFlash(&fstorage, RECORDED_TIMESTAMP_PAGE_ADDR, &gxRecordOfflineTimestamp, sizeof(gxRecordOfflineTimestamp));
+-          if(gbConnected != 1)// do not executet this if phone connected to device
++          //if(gbConnected != 1)// do not executet this if phone connected to device
+           {
+-            guLEDCounter = 0;
+-            gbProcessLED = 1;
+-            guLEDDelay = 2;
+-            vLEDOn(LED_PIN);
++//            guLEDCounter = 0;
++//            gbProcessLED = 1;
++//            guLEDDelay = 2;
++              ButtonPressedCounter++;
++              switch(ButtonPressedCounter)
++              {
++                case 1:
++                vLEDOn(LED_PIN_1);
++                vLEDOff(LED_PIN_2);
++                vLEDOff(LED_PIN_3);
++                vLEDOff(LED_PIN_4);
++                vLEDOff(LED_PIN_5);
++                break;
++                case 2:
++                vLEDOn(LED_PIN_2);
++                break;
++                case 3:
++                vLEDOn(LED_PIN_3);
++                break;
++                case 4:
++                vLEDOn(LED_PIN_4);
++                break;
++                case 5:
++                vLEDOn(LED_PIN_5);
++                ButtonPressedCounter = 0;
++                break;
++                default:
++
++                break;
++              }
++           }
++        }
++
++        if(deviceLEDOffCnt >= LED_OFF_CNT)
++        {
++          deviceLEDOffCnt = 0;
++          ButtonPressedCounter = 0;
++          vLEDOff(LED_PIN_1);
++          vLEDOff(LED_PIN_2);
++          vLEDOff(LED_PIN_3);
++          vLEDOff(LED_PIN_4);
++          vLEDOff(LED_PIN_5);
++        }
++
++        if((RecordTemperatureIntervalCnt >= RECORD_TEMPERATURE_INTERVAL) && gbConnected == 1 && gbAccessGiven == 1)
++        {
++          RecordTemperatureIntervalCnt = 0;
++           uint8_t TempBuffer[50];
++          sprintf(TempBuffer,"#2,[%d,%d]\r\n",uReadTime(),iGetTemperature());
++          vSendDataToBLEUART(TempBuffer);
++        }
++        else if(RecordTemperatureIntervalCnt >= RECORD_TEMPERATURE_INTERVAL)
++        {
++          RecordTemperatureIntervalCnt = 0;
++          uint32_t tempTimestamp = 0;
++          tempTimestamp = uReadTime();
++          int temperature = iGetTemperature();
++          if(gxRecordOfflineTemperature.TimestampCount < TOTAL_TIMESTAMP)
++          {
++            gxRecordOfflineTemperature.Timestamp[gxRecordOfflineTemperature.TimestampCount] =  tempTimestamp;
++            gxRecordOfflineTemperature.Temperature[gxRecordOfflineTemperature.TimestampCount] = temperature;
++            gxRecordOfflineTemperature.TimestampCount++;
+           }
++          else
++          {
++            for(int index=0; index < (TOTAL_TIMESTAMP - 1); index++)
++            {
++              gxRecordOfflineTemperature.Timestamp[index] = gxRecordOfflineTemperature.Timestamp[index+1];
++              gxRecordOfflineTemperature.Temperature[index] = gxRecordOfflineTemperature.Temperature[index+1];
++            }
++            gxRecordOfflineTemperature.Timestamp[(TOTAL_TIMESTAMP - 1)] =  tempTimestamp;
++            gxRecordOfflineTemperature.Temperature[(TOTAL_TIMESTAMP - 1)] =  temperature;
++            
++          }
++          vEraseFlash(&fstorage, RECORDED_TEMPERATURE_PAGE_ADDR,1, NULL);
++          vWriteFlash(&fstorage, RECORDED_TEMPERATURE_PAGE_ADDR, &gxRecordOfflineTemperature, sizeof(gxRecordOfflineTemperature));
++
+         }
+ 
+         idle_state_handle();
